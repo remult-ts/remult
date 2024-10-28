@@ -134,6 +134,20 @@ export interface RemultServerOptions<RequestType> {
     responseBody: any
     sendError: (httpStatusCode: number, body: any) => void
   }) => Promise<void> | undefined
+
+  modules?: Module<RequestType>[]
+}
+
+export type Module<RequestType> = {
+  key: string
+  /** @default 0 */
+  priority?: number
+  // caption?: string
+  entities?: ClassType<unknown>[]
+  controllers?: ClassType<unknown>[]
+  initApi?: RemultServerOptions<RequestType>['initApi']
+
+  modules?: Module<RequestType>[]
 }
 
 export interface InitRequestOptions {
@@ -250,6 +264,8 @@ export class RemultServerImplementation<RequestType>
   implements RemultServer<RequestType>
 {
   liveQueryStorage: LiveQueryStorage = new InMemoryLiveQueryStorage()
+  entities: ClassType<any>[] = []
+  controllers: ClassType<any>[] = []
   constructor(
     public queue: inProcessQueueHandler,
     public options: RemultServerOptions<any>,
@@ -260,7 +276,20 @@ export class RemultServerImplementation<RequestType>
       this.liveQueryStorage = options.liveQueryStorage
     if (options.subscriptionServer)
       this.subscriptionServer = options.subscriptionServer
+
     const entitiesMetaData: EntityMetadata[] = []
+    const modules = options.modules ?? []
+    modules.push({
+      key: 'default',
+      priority: 0,
+      entities: options.entities ?? [],
+      controllers: options.controllers ?? [],
+      initApi: options.initApi,
+      modules: [],
+    })
+    const modulesSorted = modulesFlatAndOrdered<RequestType>(modules)
+    this.entities = modulesSorted.flatMap((m) => m.entities ?? [])
+    this.controllers = modulesSorted.flatMap((m) => m.controllers ?? [])
 
     this.dataProvider = dataProvider.then(async (dp) => {
       await this.runWithRemult(
@@ -273,9 +302,9 @@ export class RemultServerImplementation<RequestType>
               started = true
               console.time('Schema ensured')
             }
-            if (options.entities)
+            if (this.entities)
               entitiesMetaData.push(
-                ...options.entities!.map((e) => remult.repo(e).metadata),
+                ...this.entities!.map((e) => remult.repo(e).metadata),
               )
             if (dp.ensureSchema) {
               startConsoleLog()
@@ -292,7 +321,19 @@ export class RemultServerImplementation<RequestType>
             }
             if (started) console.timeEnd('Schema ensured')
           }
-          if (options.initApi) await options.initApi(remult)
+          for (let i = 0; i < modulesSorted.length; i++) {
+            const f = modulesSorted[i].initApi
+            if (f) {
+              await f(remult)
+              // Let's speak about this later
+              // try {
+              //   await f(remult)
+              // } catch (error) {
+              //   const log = new Log(`remult | ${modulesSorted[i].name}`)
+              //   log.error(error)
+              // }
+            }
+          }
         },
         { skipDataProvider: true },
       )
@@ -319,7 +360,7 @@ export class RemultServerImplementation<RequestType>
   getEntities(): EntityMetadata<any>[] {
     //TODO V2 - consider using entitiesMetaData - but it may require making it all awaitable
     var r = new Remult()
-    return this.options.entities!.map((x) => r.repo(x).metadata)
+    return this.entities!.map((x) => r.repo(x).metadata)
   }
 
   runWithSerializedJsonContextData: PerformWithContext = async (
@@ -327,7 +368,7 @@ export class RemultServerImplementation<RequestType>
     entityKey,
     what,
   ) => {
-    for (const e of this.options.entities!) {
+    for (const e of this.entities!) {
       let key = getEntityKey(e)
       if (key === entityKey) {
         await this.runWithRemult(async (remult) => {
@@ -384,7 +425,7 @@ export class RemultServerImplementation<RequestType>
     if (this.registeredRouter) throw 'Router already registered'
     this.registeredRouter = true
     {
-      for (const c of this.options.controllers!) {
+      for (const c of this.controllers!) {
         let z = (c as any)[classBackendMethodsArray]
         if (z)
           for (const a of z) {
@@ -425,7 +466,7 @@ export class RemultServerImplementation<RequestType>
               origResponse.send(
                 remultAdminHtml({
                   remult: remult,
-                  entities: this.options.entities!,
+                  entities: this.entities!,
                   baseUrl: this.options.rootPath + '/admin',
                 }),
               )
@@ -497,7 +538,7 @@ export class RemultServerImplementation<RequestType>
       )
     }
 
-    this.options.entities?.forEach((e) => {
+    this.entities?.forEach((e) => {
       let key = getEntityKey(e)
       if (key != undefined)
         this.add(
@@ -1537,4 +1578,31 @@ remultStatic.allEntities.splice(
 export interface ServerCoreOptions<RequestType> {
   buildGenericRequestInfo(req: RequestType): GenericRequestInfo
   getRequestBody(req: RequestType): Promise<any>
+}
+
+/**
+ * Full flat and ordered list by index and concatenaining the modules name
+ */
+export const modulesFlatAndOrdered = <RequestType>(
+  modules: Module<RequestType>[],
+): Module<RequestType>[] => {
+  const flattenModules = (
+    modules: Module<RequestType>[],
+    parentName = '',
+  ): Module<RequestType>[] => {
+    return modules.reduce<Module<RequestType>[]>((acc, module) => {
+      const fullKey = parentName ? `${parentName}-${module.key}` : module.key
+      // Create a new module object without the 'modules' property
+      const { modules: _, ...flatModule } = module
+      const newModule = { ...flatModule, key: fullKey }
+      const subModules = module.modules
+        ? flattenModules(module.modules, fullKey)
+        : []
+      return [...acc, newModule, ...subModules]
+    }, [])
+  }
+
+  const flatModules = flattenModules(modules)
+  flatModules.sort((a, b) => (a.priority || 0) - (b.priority || 0))
+  return flatModules
 }

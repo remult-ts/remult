@@ -331,6 +331,10 @@ export default defineConfig({
                 text: 'Admin UI',
                 link: '/docs/admin-ui',
               },
+              {
+                text: 'Module Driven Development',
+                link: '/docs/modules',
+              },
             ],
           },
           {
